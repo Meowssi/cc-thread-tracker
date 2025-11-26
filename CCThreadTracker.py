@@ -4,7 +4,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import requests
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import concurrent.futures
 import time
 
@@ -25,7 +25,7 @@ LIVE_FORUMS = os.environ.get("LIVE_FORUMS", "Hot Deals,Marketplace Deals").split
 cookies = {"__ssid": os.environ.get("__SSID_COOKIE", "e93036082fb59fa25d8ac2077578d17")}
 headers = {"User-Agent": os.environ.get("USER_AGENT", "Mozilla/5.0")}
 
-MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "40"))
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "10"))
 
 creds = Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO, scopes=SCOPES)
 gc = gspread.authorize(creds)
@@ -148,58 +148,76 @@ def send_slack_expired_alert(row, checkbox, prev_status, new_status):
 def main_loop():
     while True:
         try:
-            thread_ids = sheet.col_values(1)[1:]
-            urls = sheet.col_values(2)[1:]
+            # Only consider threads whose post date (Col C) is within the last N days
+            days_back = int(os.environ.get("DAYS_BACK", "30"))
+            now = datetime.now()
+            cutoff_date = now - timedelta(days=days_back)
 
-            rows_with_data = [
-                (i + 2, url)
-                for i, (tid, url) in enumerate(zip(thread_ids, urls))
-                if tid.strip() and url.strip()
-            ]
+            # Read columns A (thread id), B (URL), C (post date)
+            thread_ids = sheet.col_values(1)[1:]  # A
+            urls = sheet.col_values(2)[1:]        # B
+            dates = sheet.col_values(3)[1:]       # C
 
+            rows_with_data = []
+
+            for i, (tid, url, date_str) in enumerate(zip(thread_ids, urls, dates)):
+                if not tid.strip() or not url.strip():
+                    continue
+                if not date_str.strip():
+                    continue
+
+                # Date format on sheet: 11/26/2025 (mm/dd/yyyy)
+                try:
+                    post_dt = datetime.strptime(date_str.strip(), "%m/%d/%Y")
+                except ValueError:
+                    # Skip rows with bad date format
+                    continue
+
+                # Only keep rows within the last N days
+                if post_dt >= cutoff_date:
+                    row_num = i + 2  # +2 because we skipped header row and lists are 0-based
+                    rows_with_data.append((row_num, url))
+
+            # Most recent rows first (optional)
             rows_to_process = rows_with_data[::-1]
 
             print(
-                f"\nStarting scan at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}..."
+                f"\nStarting scan at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
+                f"on {len(rows_to_process)} rows (last {days_back} days)..."
             )
 
+            # Scrape in small chunks to keep memory low
             results = []
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=MAX_WORKERS
-            ) as executor:
-                futures = [
-                    executor.submit(fetch_data, row_num, url)
-                    for row_num, url in rows_to_process
-                ]
-                for future in concurrent.futures.as_completed(futures):
-                    result = future.result()
-                    if result:
-                        results.append(result)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                for i in range(0, len(rows_to_process), MAX_WORKERS):
+                    chunk = rows_to_process[i : i + MAX_WORKERS]
+                    futures = [
+                        executor.submit(fetch_data, row_num, url)
+                        for row_num, url in chunk
+                    ]
+                    for future in concurrent.futures.as_completed(futures):
+                        result = future.result()
+                        if result:
+                            results.append(result)
 
             results.sort(key=lambda r: r["row"])
 
             prev_status_values = sheet.col_values(16)[1:]  # P
-            checkbox_values = sheet.col_values(17)[1:]  # Q
-            price_values = sheet.col_values(10)[1:]  # J
+            checkbox_values = sheet.col_values(17)[1:]     # Q
+            price_values = sheet.col_values(10)[1:]        # J
 
             updates = []
 
             for row in results:
                 row_idx = row["row"] - 2
 
-                new_status = (
-                    "LIVE" if row["thread_type"] in LIVE_FORUMS else "EXPIRED"
-                )
+                new_status = "LIVE" if row["thread_type"] in LIVE_FORUMS else "EXPIRED"
 
                 prev_status = (
-                    prev_status_values[row_idx]
-                    if row_idx < len(prev_status_values)
-                    else ""
+                    prev_status_values[row_idx] if row_idx < len(prev_status_values) else ""
                 )
                 checkbox = (
-                    checkbox_values[row_idx]
-                    if row_idx < len(checkbox_values)
-                    else ""
+                    checkbox_values[row_idx] if row_idx < len(checkbox_values) else ""
                 )
 
                 existing_price = (
@@ -208,10 +226,7 @@ def main_loop():
 
                 if not existing_price and row["final_price"]:
                     updates.append(
-                        {
-                            "range": f"J{row['row']}",
-                            "values": [[row["final_price"]]],
-                        }
+                        {"range": f"J{row['row']}", "values": [[row["final_price"]]]}
                     )
                     print(
                         f"Wrote scraped price {row['final_price']} into Col J for row {row['row']}"
@@ -219,9 +234,7 @@ def main_loop():
 
                 send_slack_expired_alert(row, checkbox, prev_status, new_status)
 
-                updates.append(
-                    {"range": f"P{row['row']}", "values": [[new_status]]}
-                )
+                updates.append({"range": f"P{row['row']}", "values": [[new_status]]})
 
                 updates.extend(
                     [
