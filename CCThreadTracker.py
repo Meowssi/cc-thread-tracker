@@ -149,7 +149,7 @@ def main_loop():
     while True:
         try:
             # Only consider threads whose post date (Col C) is within the last N days
-            days_back = int(os.environ.get("DAYS_BACK", "30"))
+            days_back = int(os.environ.get("DAYS_BACK", "120"))
             now = datetime.now()
             cutoff_date = now - timedelta(days=days_back)
 
@@ -163,20 +163,24 @@ def main_loop():
             for i, (tid, url, date_str) in enumerate(zip(thread_ids, urls, dates)):
                 if not tid.strip() or not url.strip():
                     continue
-                if not date_str.strip():
-                    continue
 
-                # Date format on sheet: 11/26/2025 (mm/dd/yyyy)
-                try:
-                    post_dt = datetime.strptime(date_str.strip(), "%m/%d/%Y")
-                except ValueError:
-                    # Skip rows with bad date format
-                    continue
+                date_str = date_str.strip()
 
-                # Only keep rows within the last N days
-                if post_dt >= cutoff_date:
-                    row_num = i + 2  # +2 because we skipped header row and lists are 0-based
-                    rows_with_data.append((row_num, url))
+                if date_str:
+                    # Date format on sheet: 11/26/2025 (mm/dd/yyyy)
+                    try:
+                        post_dt = datetime.strptime(date_str, "%m/%d/%Y")
+                    except ValueError:
+                        # Skip rows with bad date format
+                        continue
+
+                    # If we already have a date and it's older than cutoff, skip
+                    if post_dt < cutoff_date:
+                        continue
+                # If date_str is blank, we still include this row so it can be scraped
+                row_num = i + 2  # +2 because we skipped header row and lists are 0-based
+                rows_with_data.append((row_num, url))
+
 
             # Most recent rows first (optional)
             rows_to_process = rows_with_data[::-1]
