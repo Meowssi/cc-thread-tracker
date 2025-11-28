@@ -154,17 +154,23 @@ def main_loop():
             cutoff_date = now - timedelta(days=days_back)
 
             # Read columns A (thread id), B (URL), C (post date)
-            thread_ids = sheet.col_values(1)[1:]  # A
+            thread_ids = sheet.col_values(1)[1:]  # A (no header)
             urls = sheet.col_values(2)[1:]        # B
             dates = sheet.col_values(3)[1:]       # C
 
             rows_with_data = []
 
-            for i, (tid, url, date_str) in enumerate(zip(thread_ids, urls, dates)):
-                if not tid.strip() or not url.strip():
-                    continue
+            # Use max length so we also cover rows that only have ID + URL
+            max_len = max(len(thread_ids), len(urls), len(dates))
 
-                date_str = date_str.strip()
+            for i in range(max_len):
+                tid = thread_ids[i].strip() if i < len(thread_ids) else ""
+                url = urls[i].strip() if i < len(urls) else ""
+                date_str = dates[i].strip() if i < len(dates) else ""
+
+                # Require both ID and URL
+                if not tid or not url:
+                    continue
 
                 if date_str:
                     # Date format on sheet: 11/26/2025 (mm/dd/yyyy)
@@ -177,10 +183,10 @@ def main_loop():
                     # If we already have a date and it's older than cutoff, skip
                     if post_dt < cutoff_date:
                         continue
+
                 # If date_str is blank, we still include this row so it can be scraped
                 row_num = i + 2  # +2 because we skipped header row and lists are 0-based
                 rows_with_data.append((row_num, url))
-
 
             # Most recent rows first (optional)
             rows_to_process = rows_with_data[::-1]
@@ -194,7 +200,7 @@ def main_loop():
             results = []
             with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 for i in range(0, len(rows_to_process), MAX_WORKERS):
-                    chunk = rows_to_process[i : i + MAX_WORKERS]
+                    chunk = rows_to_process[i: i + MAX_WORKERS]
                     futures = [
                         executor.submit(fetch_data, row_num, url)
                         for row_num, url in chunk
