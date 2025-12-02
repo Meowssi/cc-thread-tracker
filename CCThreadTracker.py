@@ -7,10 +7,15 @@ from requests.adapters import HTTPAdapter
 from requests.exceptions import Timeout, RequestException
 from urllib3.util.retry import Retry
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import concurrent.futures
 import time
 from gspread.exceptions import APIError
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -23,7 +28,6 @@ SHEET_NAME = os.environ.get("SHEET_NAME", "Jeff's Thread Tracker v2")
 SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
 SLACK_CHANNEL_ID = os.environ["SLACK_CHANNEL_ID"]
 
-# NEW: log bot env vars
 LOG_SLACK_BOT_TOKEN = os.environ.get("LOG_SLACK_BOT_TOKEN")
 LOG_SLACK_CHANNEL_ID = os.environ.get("LOG_SLACK_CHANNEL_ID")
 
@@ -81,7 +85,10 @@ def safe_sheet_get_range(sheet_obj, range_a1, max_attempts=3):
         except APIError as e:
             if is_quota_error(e) and attempt < max_attempts:
                 wait = 5 * attempt
-                print(f"Sheets 429 on get({range_a1}), retry {attempt}/{max_attempts} in {wait}s...")
+                print(
+                    f"Sheets 429 on get({range_a1}), retry "
+                    f"{attempt}/{max_attempts} in {wait}s..."
+                )
                 time.sleep(wait)
                 continue
             raise
@@ -95,17 +102,17 @@ def safe_batch_update(sheet_obj, updates, max_attempts=3):
         except APIError as e:
             if is_quota_error(e) and attempt < max_attempts:
                 wait = 5 * attempt
-                print(f"Sheets 429 on batch_update, retry {attempt}/{max_attempts} in {wait}s...")
+                print(
+                    f"Sheets 429 on batch_update, retry "
+                    f"{attempt}/{max_attempts} in {wait}s..."
+                )
                 time.sleep(wait)
                 continue
             raise
 
 
-# NEW: log helper
 def send_log_to_slack(level, text):
-    """Send a log message to the log channel via the LOG_ Slack bot."""
     if not LOG_SLACK_BOT_TOKEN or not LOG_SLACK_CHANNEL_ID:
-        # Logging bot not configured; fail silently
         return
 
     slack_url = "https://slack.com/api/chat.postMessage"
@@ -198,7 +205,8 @@ def fetch_data(row_num, url):
         except Timeout as e:
             if attempt < MAX_ATTEMPTS:
                 print(
-                    f"Timeout scraping row {row_num} (attempt {attempt}/{MAX_ATTEMPTS}): {e}"
+                    f"Timeout scraping row {row_num} "
+                    f"(attempt {attempt}/{MAX_ATTEMPTS}): {e}"
                 )
                 time.sleep(1.5 * attempt)
                 continue
@@ -218,7 +226,9 @@ def fetch_data(row_num, url):
             return None
 
 
-def send_slack_expired_alert(row, checkbox, prev_status, new_status, thread_id, thread_link, sheet_title):
+def send_slack_expired_alert(
+    row, checkbox, prev_status, new_status, thread_id, thread_link, sheet_title
+):
     if not (prev_status == "LIVE" and new_status == "EXPIRED"):
         return
 
@@ -231,6 +241,10 @@ def send_slack_expired_alert(row, checkbox, prev_status, new_status, thread_id, 
         mention_texts.append("<@U034HJT6F8W>")
     elif poster == "iconian | Staff":
         mention_texts.append("<@U0EBD4P2B>")
+    elif poster == "babgaly | Staff":
+        mention_texts.append("<@U04NV49HVBJ>")
+    elif poster == "doublehelixx | Staff":
+        mention_texts.append("<@U06LEP9SCJE>")
 
     if str(checkbox).lower() in ["true", "yes", "1", "checked", "☑"]:
         mention_texts.append("<@U03MWUXPALA>")
@@ -266,15 +280,21 @@ def send_slack_expired_alert(row, checkbox, prev_status, new_status, thread_id, 
         )
 
 
+
 def main_loop():
     while True:
-        run_start = datetime.now()
+        run_start = datetime.now(timezone.utc)
+        local_start = (
+            run_start.astimezone(ZoneInfo("America/Los_Angeles"))
+            if ZoneInfo
+            else run_start
+        )
 
         try:
-            # Log run start (no @here, level INFO)
             send_log_to_slack(
                 "INFO",
-                f"Run starting at {run_start.isoformat(timespec='seconds')}"
+                "Thread Scraping Run starting: "
+                f"{local_start.strftime('%m/%d/%Y %H:%M %Z')}",
             )
 
             days_back = int(os.environ.get("DAYS_BACK", "120"))
@@ -284,15 +304,21 @@ def main_loop():
             rows = safe_sheet_get_range(sheet, "A2:Q")
             if not rows:
                 print("No data rows in sheet.")
-                sleep_seconds = int(os.environ.get("SLEEP_SECONDS", "300"))
-                # Run finished (nothing to do)
-                run_end = datetime.now()
+                run_end = datetime.now(timezone.utc)
+                local_end = (
+                    run_end.astimezone(ZoneInfo("America/Los_Angeles"))
+                    if ZoneInfo
+                    else run_end
+                )
                 duration = (run_end - run_start).total_seconds()
                 send_log_to_slack(
                     "INFO",
-                    f"Run completed at {run_end.isoformat(timespec='seconds')} "
-                    f"(duration {duration:.1f}s, rows_to_process=0, rows_scraped=0, updates=0)"
+                    "Thread Scraping Run completed: "
+                    f"{local_end.strftime('%m/%d/%Y %H:%M %Z')} "
+                    f"(duration {duration:.1f}s, rows_to_process=0, "
+                    "rows_scraped=0, updates=0)",
                 )
+                sleep_seconds = int(os.environ.get("SLEEP_SECONDS", "300"))
                 time.sleep(sleep_seconds)
                 continue
 
@@ -307,7 +333,6 @@ def main_loop():
                 thread_ids.append(row_vals[0] if len(row_vals) > 0 else "")
                 urls.append(row_vals[1] if len(row_vals) > 1 else "")
                 dates.append(row_vals[2] if len(row_vals) > 2 else "")
-            #     J (10th col, index 9), P (16th col, index 15), Q (17th col, index 16)
                 price_values.append(row_vals[9] if len(row_vals) > 9 else "")
                 prev_status_values.append(row_vals[15] if len(row_vals) > 15 else "")
                 checkbox_values.append(row_vals[16] if len(row_vals) > 16 else "")
@@ -347,7 +372,7 @@ def main_loop():
                 max_workers=MAX_WORKERS
             ) as executor:
                 for i in range(0, len(rows_to_process), MAX_WORKERS):
-                    chunk = rows_to_process[i: i + MAX_WORKERS]
+                    chunk = rows_to_process[i : i + MAX_WORKERS]
                     futures = [
                         executor.submit(fetch_data, row_num, url)
                         for (row_num, url) in chunk
@@ -442,19 +467,23 @@ def main_loop():
                     ]
                 )
 
-
             if updates:
                 safe_batch_update(sheet, updates)
                 print(f"Batch update complete. Rows written: {len(results)}")
 
-            # Log run completion (no @here, level INFO)
-            run_end = datetime.now()
+            run_end = datetime.now(timezone.utc)
+            local_end = (
+                run_end.astimezone(ZoneInfo("America/Los_Angeles"))
+                if ZoneInfo
+                else run_end
+            )
             duration = (run_end - run_start).total_seconds()
             send_log_to_slack(
                 "INFO",
-                f"Run completed at {run_end.isoformat(timespec='seconds')} "
+                "Thread Scraping Run completed: "
+                f"{local_end.strftime('%m/%d/%Y %H:%M %Z')} "
                 f"(duration {duration:.1f}s, rows_to_process={len(rows_to_process)}, "
-                f"rows_scraped={len(results)}, updates={len(updates)})"
+                f"rows_scraped={len(results)}, updates={len(updates)})",
             )
 
             sleep_seconds = int(os.environ.get("SLEEP_SECONDS", "300"))
@@ -478,6 +507,7 @@ def main_loop():
             print(msg)
             send_log_to_slack("CRITICAL", msg)
             time.sleep(60)
+
 
 if __name__ == "__main__":
     main_loop()
