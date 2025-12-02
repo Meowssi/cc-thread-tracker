@@ -268,7 +268,15 @@ def send_slack_expired_alert(row, checkbox, prev_status, new_status, thread_id, 
 
 def main_loop():
     while True:
+        run_start = datetime.now()
+
         try:
+            # Log run start (no @here, level INFO)
+            send_log_to_slack(
+                "INFO",
+                f"Run starting at {run_start.isoformat(timespec='seconds')}"
+            )
+
             days_back = int(os.environ.get("DAYS_BACK", "120"))
             now = datetime.now()
             cutoff_date = now - timedelta(days=days_back)
@@ -277,6 +285,14 @@ def main_loop():
             if not rows:
                 print("No data rows in sheet.")
                 sleep_seconds = int(os.environ.get("SLEEP_SECONDS", "300"))
+                # Run finished (nothing to do)
+                run_end = datetime.now()
+                duration = (run_end - run_start).total_seconds()
+                send_log_to_slack(
+                    "INFO",
+                    f"Run completed at {run_end.isoformat(timespec='seconds')} "
+                    f"(duration {duration:.1f}s, rows_to_process=0, rows_scraped=0, updates=0)"
+                )
                 time.sleep(sleep_seconds)
                 continue
 
@@ -291,6 +307,7 @@ def main_loop():
                 thread_ids.append(row_vals[0] if len(row_vals) > 0 else "")
                 urls.append(row_vals[1] if len(row_vals) > 1 else "")
                 dates.append(row_vals[2] if len(row_vals) > 2 else "")
+            #     J (10th col, index 9), P (16th col, index 15), Q (17th col, index 16)
                 price_values.append(row_vals[9] if len(row_vals) > 9 else "")
                 prev_status_values.append(row_vals[15] if len(row_vals) > 15 else "")
                 checkbox_values.append(row_vals[16] if len(row_vals) > 16 else "")
@@ -403,11 +420,11 @@ def main_loop():
                             "values": [[row["post_date"]]],
                         },
                         {
-                            "range": f"D{row['row']}",
+                            "range": f"D{row['row"]}",
                             "values": [[row["title"]]],
                         },
                         {
-                            "range": f"E{row['row']}",
+                            "range": f"E{row['row"]}",
                             "values": [[row["votes"]]],
                         },
                         {
@@ -429,6 +446,16 @@ def main_loop():
                 safe_batch_update(sheet, updates)
                 print(f"Batch update complete. Rows written: {len(results)}")
 
+            # Log run completion (no @here, level INFO)
+            run_end = datetime.now()
+            duration = (run_end - run_start).total_seconds()
+            send_log_to_slack(
+                "INFO",
+                f"Run completed at {run_end.isoformat(timespec='seconds')} "
+                f"(duration {duration:.1f}s, rows_to_process={len(rows_to_process)}, "
+                f"rows_scraped={len(results)}, updates={len(updates)})"
+            )
+
             sleep_seconds = int(os.environ.get("SLEEP_SECONDS", "300"))
             print(f"Sleeping {sleep_seconds} seconds...\n")
             time.sleep(sleep_seconds)
@@ -437,7 +464,6 @@ def main_loop():
             if is_quota_error(e):
                 msg = f"Script hit Sheets quota (429). Backing off 120s. Error: {e}"
                 print(msg)
-                # crucial log: quota issues
                 send_log_to_slack("ALERT", msg)
                 time.sleep(120)
             else:
@@ -449,11 +475,8 @@ def main_loop():
         except Exception as e:
             msg = f"Script error in main_loop: {e}"
             print(msg)
-            # crucial log: unexpected failure
             send_log_to_slack("CRITICAL", msg)
             time.sleep(60)
-
-
 
 if __name__ == "__main__":
     main_loop()
