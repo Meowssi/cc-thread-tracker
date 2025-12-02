@@ -435,15 +435,24 @@ def main_loop():
 
         except APIError as e:
             if is_quota_error(e):
-                print(f"Script hit Sheets quota (429). Backing off 120s: {e}")
+                msg = f"Script hit Sheets quota (429). Backing off 120s. Error: {e}"
+                print(msg)
+                # crucial log: quota issues
+                send_log_to_slack("ALERT", msg)
                 time.sleep(120)
             else:
-                print(f"Google Sheets API error: {e}")
+                msg = f"Google Sheets API error: {e}"
+                print(msg)
+                send_log_to_slack("ERROR", msg)
                 time.sleep(60)
 
         except Exception as e:
-            print(f"Script error: {e}")
+            msg = f"Script error in main_loop: {e}"
+            print(msg)
+            # crucial log: unexpected failure
+            send_log_to_slack("CRITICAL", msg)
             time.sleep(60)
+
 
 
 if __name__ == "__main__":
