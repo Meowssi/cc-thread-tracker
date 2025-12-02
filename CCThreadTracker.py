@@ -10,6 +10,7 @@ import re
 from datetime import datetime, timedelta
 import concurrent.futures
 import time
+from gspread.exceptions import APIError
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -26,9 +27,8 @@ LIVE_FORUMS = os.environ.get(
     "LIVE_FORUMS", "Hot Deals,Marketplace Deals"
 ).split(",")
 
-# Concurrency + networking tuning
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "10"))
-READ_TIMEOUT = int(os.environ.get("READ_TIMEOUT", "20"))  # was 10
+READ_TIMEOUT = int(os.environ.get("READ_TIMEOUT", "20"))
 MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))
 
 cookies = {
@@ -43,7 +43,6 @@ default_headers = {
     )
 }
 
-# ---- requests.Session with retries + pooling ----
 session = requests.Session()
 retry_cfg = Retry(
     total=3,
@@ -64,6 +63,38 @@ session.headers.update(default_headers)
 creds = Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO, scopes=SCOPES)
 gc = gspread.authorize(creds)
 sheet = gc.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+
+
+def is_quota_error(e: Exception) -> bool:
+    s = str(e)
+    return "429" in s or "Quota exceeded" in s or "Rate Limit Exceeded" in s
+
+
+def safe_sheet_get_range(sheet_obj, range_a1, max_attempts=3):
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return sheet_obj.get(range_a1)
+        except APIError as e:
+            if is_quota_error(e) and attempt < max_attempts:
+                wait = 5 * attempt
+                print(f"Sheets 429 on get({range_a1}), retry {attempt}/{max_attempts} in {wait}s...")
+                time.sleep(wait)
+                continue
+            raise
+
+
+def safe_batch_update(sheet_obj, updates, max_attempts=3):
+    for attempt in range(1, max_attempts + 1):
+        try:
+            sheet_obj.batch_update(updates)
+            return
+        except APIError as e:
+            if is_quota_error(e) and attempt < max_attempts:
+                wait = 5 * attempt
+                print(f"Sheets 429 on batch_update, retry {attempt}/{max_attempts} in {wait}s...")
+                time.sleep(wait)
+                continue
+            raise
 
 
 def fetch_data(row_num, url):
@@ -129,12 +160,10 @@ def fetch_data(row_num, url):
             }
 
         except Timeout as e:
-            # Slickdeals took longer than READ_TIMEOUT
             if attempt < MAX_ATTEMPTS:
                 print(
                     f"Timeout scraping row {row_num} (attempt {attempt}/{MAX_ATTEMPTS}): {e}"
                 )
-                # exponential-ish backoff
                 time.sleep(1.5 * attempt)
                 continue
             else:
@@ -145,7 +174,6 @@ def fetch_data(row_num, url):
                 return None
 
         except RequestException as e:
-            # Connection errors, DNS, etc.
             print(f"Request error scraping row {row_num}: {e}")
             return None
 
@@ -154,12 +182,9 @@ def fetch_data(row_num, url):
             return None
 
 
-def send_slack_expired_alert(row, checkbox, prev_status, new_status):
+def send_slack_expired_alert(row, checkbox, prev_status, new_status, thread_id, thread_link, sheet_title):
     if not (prev_status == "LIVE" and new_status == "EXPIRED"):
         return
-
-    row_num = row["row"]
-    thread_id = sheet.cell(row_num, 1).value
 
     mention_texts = []
 
@@ -175,9 +200,6 @@ def send_slack_expired_alert(row, checkbox, prev_status, new_status):
         mention_texts.append("<@U03MWUXPALA>")
 
     mention_str = " ".join(mention_texts).strip()
-
-    sheet_title = sheet.cell(row_num, 4).value  # Column D = Title
-    thread_link = sheet.cell(row_num, 2).value  # Column B = Thread link
 
     slack_text = f"*Thread Expired*\n\n*Title:* {sheet_title}\n*Link:* {thread_link}"
     if mention_str:
@@ -215,10 +237,27 @@ def main_loop():
             now = datetime.now()
             cutoff_date = now - timedelta(days=days_back)
 
-            # Columns A (thread id), B (URL), C (post date)
-            thread_ids = sheet.col_values(1)[1:]
-            urls = sheet.col_values(2)[1:]
-            dates = sheet.col_values(3)[1:]
+            rows = safe_sheet_get_range(sheet, "A2:Q")
+            if not rows:
+                print("No data rows in sheet.")
+                sleep_seconds = int(os.environ.get("SLEEP_SECONDS", "300"))
+                time.sleep(sleep_seconds)
+                continue
+
+            thread_ids = []
+            urls = []
+            dates = []
+            price_values = []
+            prev_status_values = []
+            checkbox_values = []
+
+            for row_vals in rows:
+                thread_ids.append(row_vals[0] if len(row_vals) > 0 else "")
+                urls.append(row_vals[1] if len(row_vals) > 1 else "")
+                dates.append(row_vals[2] if len(row_vals) > 2 else "")
+                price_values.append(row_vals[9] if len(row_vals) > 9 else "")
+                prev_status_values.append(row_vals[15] if len(row_vals) > 15 else "")
+                checkbox_values.append(row_vals[16] if len(row_vals) > 16 else "")
 
             rows_with_data = []
             max_len = max(len(thread_ids), len(urls), len(dates))
@@ -235,7 +274,6 @@ def main_loop():
                     try:
                         post_dt = datetime.strptime(date_str, "%m/%d/%Y")
                     except ValueError:
-                        # bad date format; skip
                         continue
 
                     if post_dt < cutoff_date:
@@ -256,10 +294,10 @@ def main_loop():
                 max_workers=MAX_WORKERS
             ) as executor:
                 for i in range(0, len(rows_to_process), MAX_WORKERS):
-                    chunk = rows_to_process[i : i + MAX_WORKERS]
+                    chunk = rows_to_process[i: i + MAX_WORKERS]
                     futures = [
                         executor.submit(fetch_data, row_num, url)
-                        for row_num, url in chunk
+                        for (row_num, url) in chunk
                     ]
                     for future in concurrent.futures.as_completed(futures):
                         result = future.result()
@@ -268,18 +306,13 @@ def main_loop():
 
             results.sort(key=lambda r: r["row"])
 
-            prev_status_values = sheet.col_values(16)[1:]  # P
-            checkbox_values = sheet.col_values(17)[1:]     # Q
-            price_values = sheet.col_values(10)[1:]        # J
-
             updates = []
 
             for row in results:
                 row_idx = row["row"] - 2
 
-                new_status = (
-                    "LIVE" if row["thread_type"] in LIVE_FORUMS else "EXPIRED"
-                )
+                thread_type = row["thread_type"]
+                new_status = "LIVE" if thread_type in LIVE_FORUMS else "EXPIRED"
 
                 prev_status = (
                     prev_status_values[row_idx]
@@ -309,7 +342,19 @@ def main_loop():
                         f"into Col J for row {row['row']}"
                     )
 
-                send_slack_expired_alert(row, checkbox, prev_status, new_status)
+                thread_id = thread_ids[row_idx] if row_idx < len(thread_ids) else ""
+                thread_link = urls[row_idx] if row_idx < len(urls) else ""
+                sheet_title = row["title"]
+
+                send_slack_expired_alert(
+                    row,
+                    checkbox,
+                    prev_status,
+                    new_status,
+                    thread_id,
+                    thread_link,
+                    sheet_title,
+                )
 
                 updates.append(
                     {"range": f"P{row['row']}", "values": [[new_status]]}
@@ -345,12 +390,20 @@ def main_loop():
                 )
 
             if updates:
-                sheet.batch_update(updates)
+                safe_batch_update(sheet, updates)
                 print(f"Batch update complete. Rows written: {len(results)}")
 
             sleep_seconds = int(os.environ.get("SLEEP_SECONDS", "300"))
             print(f"Sleeping {sleep_seconds} seconds...\n")
             time.sleep(sleep_seconds)
+
+        except APIError as e:
+            if is_quota_error(e):
+                print(f"Script hit Sheets quota (429). Backing off 120s: {e}")
+                time.sleep(120)
+            else:
+                print(f"Google Sheets API error: {e}")
+                time.sleep(60)
 
         except Exception as e:
             print(f"Script error: {e}")
