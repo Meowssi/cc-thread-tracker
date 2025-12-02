@@ -23,6 +23,10 @@ SHEET_NAME = os.environ.get("SHEET_NAME", "Jeff's Thread Tracker v2")
 SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
 SLACK_CHANNEL_ID = os.environ["SLACK_CHANNEL_ID"]
 
+# NEW: log bot env vars
+LOG_SLACK_BOT_TOKEN = os.environ.get("LOG_SLACK_BOT_TOKEN")
+LOG_SLACK_CHANNEL_ID = os.environ.get("LOG_SLACK_CHANNEL_ID")
+
 LIVE_FORUMS = os.environ.get(
     "LIVE_FORUMS", "Hot Deals,Marketplace Deals"
 ).split(",")
@@ -95,6 +99,38 @@ def safe_batch_update(sheet_obj, updates, max_attempts=3):
                 time.sleep(wait)
                 continue
             raise
+
+
+# NEW: log helper
+def send_log_to_slack(level, text):
+    """Send a log message to the log channel via the LOG_ Slack bot."""
+    if not LOG_SLACK_BOT_TOKEN or not LOG_SLACK_CHANNEL_ID:
+        # Logging bot not configured; fail silently
+        return
+
+    slack_url = "https://slack.com/api/chat.postMessage"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LOG_SLACK_BOT_TOKEN}",
+    }
+
+    level_up = (level or "").upper()
+    if level_up in ("CRITICAL", "ALERT"):
+        prefix = f"<!here> *[{level_up}]* "
+    else:
+        prefix = f"*[{level_up or 'INFO'}]* "
+
+    payload = {
+        "channel": LOG_SLACK_CHANNEL_ID,
+        "text": prefix + text,
+    }
+
+    try:
+        resp = requests.post(slack_url, json=payload, headers=headers, timeout=5)
+        if not resp.ok:
+            print(f"Failed to send log to Slack ({level_up}): {resp.text}")
+    except Exception as e:
+        print(f"Error sending log to Slack ({level_up}): {e}")
 
 
 def fetch_data(row_num, url):
@@ -375,15 +411,15 @@ def main_loop():
                             "values": [[row["votes"]]],
                         },
                         {
-                            "range": f"F{row['row']}",
+                            "range": f"F{row['row"]}",
                             "values": [[row["badge"]]],
                         },
                         {
-                            "range": f"G{row['row']}",
+                            "range": f"G{row['row"]}",
                             "values": [[row["thread_type"]]],
                         },
                         {
-                            "range": f"M{row['row']}",
+                            "range": f"M{row['row"]}",
                             "values": [[row["poster"]]],
                         },
                     ]
