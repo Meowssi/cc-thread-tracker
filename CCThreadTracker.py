@@ -420,27 +420,28 @@ def main_loop():
                             "values": [[row["post_date"]]],
                         },
                         {
-                            "range": f"D{row['row"]}",
+                            "range": f"D{row['row']}",
                             "values": [[row["title"]]],
                         },
                         {
-                            "range": f"E{row['row"]}",
+                            "range": f"E{row['row']}",
                             "values": [[row["votes"]]],
                         },
                         {
-                            "range": f"F{row['row"]}",
+                            "range": f"F{row['row']}",
                             "values": [[row["badge"]]],
                         },
                         {
-                            "range": f"G{row['row"]}",
+                            "range": f"G{row['row']}",
                             "values": [[row["thread_type"]]],
                         },
                         {
-                            "range": f"M{row['row"]}",
+                            "range": f"M{row['row']}",
                             "values": [[row["poster"]]],
                         },
                     ]
                 )
+
 
             if updates:
                 safe_batch_update(sheet, updates)
